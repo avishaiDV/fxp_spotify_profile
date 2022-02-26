@@ -1,191 +1,118 @@
-import SpotifyWebApi from 'spotify-web-api-node';
-import express from 'express';
-let token = "";
-import { PuppeteerBlocker } from '@cliqz/adblocker-puppeteer';
-import * as config from './config.js';
-const app = express();
-const server = app.listen(8888, () =>
-console.log(
-  'HTTP Server up. Now go to http://localhost:8888/login in your browser.'
-)
-);
-import fs from 'fs';
-import path from 'path';
-const __dirname = path.join(path.dirname(decodeURI(new URL(import.meta.url).pathname))).replace(/^\\([A-Z]:\\)/, "$1");
-import request from 'request';
-import fetch from 'node-fetch';
-import FormData from 'form-data';
-import puppeteer from 'puppeteer';
-const {fxp_username, fxp_password, spotify_clientId, spotify_clientSecret, spotify_redirectUri} = config.default;
+const {USER_ID_FXP, LOGIN_USERNAME, LOGIN_PASSWORD, SPOTIFY_DETAILS, BACKUP_AVATAR_LINK} = require('./config')
+const url           = require('url')
+const fetch         = require('node-fetch')
+const process       = require('process')
+const FormData      = require('form-data')
+const SpotifyWebApi = require('spotify-web-api-node')
+const spotifyApi    = new SpotifyWebApi(SPOTIFY_DETAILS)
+const headers       = {}
+const scopes        = ['user-read-playback-state', 'user-read-currently-playing']
+let prevSong        = ''
 
-const scopes = [
-    'ugc-image-upload',
-    'user-read-playback-state',
-    'user-modify-playback-state',
-    'user-read-currently-playing',
-    'streaming',
-    'app-remote-control',
-    'user-read-email',
-    'user-read-private',
-    'playlist-read-collaborative',
-    'playlist-modify-public',
-    'playlist-read-private',
-    'playlist-modify-private',
-    'user-library-modify',
-    'user-library-read',
-    'user-top-read',
-    'user-read-playback-position',
-    'user-read-recently-played',
-    'user-follow-read',
-    'user-follow-modify'
-  ];
-  
-var spotifyApi = new SpotifyWebApi({
-    clientId: spotify_clientId,
-    clientSecret: spotify_clientSecret,
-    redirectUri: spotify_redirectUri
-  });  
-  app.get('/login', (req, res) => {
-    res.redirect(spotifyApi.createAuthorizeURL(scopes));
-  });
-  
-  app.get('/callback', (req, res) => {
-    const error = req.query.error;
-    const code = req.query.code;
-    const state = req.query.state;
-  
-    if (error) {
-      console.error('Callback Error:', error);
-      res.send(`Callback Error: ${error}`);
-      return;
-    }
-  
-    spotifyApi
-      .authorizationCodeGrant(code)
-      .then(data => {
-        const access_token = data.body['access_token'];
-        const refresh_token = data.body['refresh_token'];
-        const expires_in = data.body['expires_in'];
-  
-        spotifyApi.setAccessToken(access_token);
-        spotifyApi.setRefreshToken(refresh_token);  
-        token = access_token;
-        res.send('Success! You can now close the window.');
-  
-        setInterval(async () => {
-          const data = await spotifyApi.refreshAccessToken();
-          const access_token = data.body['access_token'];
-          token = access_token
-          spotifyApi.setAccessToken(access_token);
-        }, expires_in / 2 * 1000);
-      })
-      .catch(error => {
-        console.error('Error getting Tokens:', error);
-        res.send(`Error getting Tokens: ${error}`);
-      });
-  });
+fxpLogin(LOGIN_USERNAME, LOGIN_PASSWORD)
 
-spotifyApi.setAccessToken(token);
+require('http').createServer(function (req, res) {
+  if (req.url.startsWith('/callback')) return callback(req, res)
+  res.writeHead(302, {'Location': spotifyApi.createAuthorizeURL(scopes)}).end()
+}).listen(8888, function() {
+  console.log('HTTP Server up. Now go to http://localhost:8888/login in your browser.')
+})
 
-var download = function(uri, filename, callback){
-  request.head(uri, function(err, res, body){
-    console.log('content-type:', res.headers['content-type']);
-    console.log('content-length:', res.headers['content-length']);
+function callback(req, res) {
+  spotifyApi.authorizationCodeGrant(url.parse(req.url, true).query.code)
+  .then(function(data) {
+    const {access_token, refresh_token, expires_in} = data.body
+    spotifyApi.setAccessToken(access_token)
+    spotifyApi.setRefreshToken(refresh_token)
+    res.end('Success! You can now close the window.')
+    setInterval(async function() {
+      const data = await spotifyApi.refreshAccessToken()
+      spotifyApi.setAccessToken(data.body['access_token'])  
+    }, expires_in / 2 * 1000)
+  })
+  .catch(error => {
+    res.writeHead(302, {'Location': spotifyApi.createAuthorizeURL(scopes)}).end()
+  })
+}
 
-    request(uri).pipe(fs.createWriteStream(filename)).on('close', callback);
-  });
-};
+function parseCookies(response) {
+  const raw = response.headers.raw()['set-cookie']
+  return raw.map((entry) => {
+    const parts = entry.split(';')
+    const cookiePart = parts[0]
+    return cookiePart
+  }).join(';')
+}
 
-let prevSong;
+function fxpLogin(vb_login_username, vb_login_password) {
+  const body = new FormData
+  body.append('vb_login_username', vb_login_username)
+  body.append('vb_login_password', vb_login_password)
+  body.append('securitytoken', 'guest')
+  body.append('cookieuser', '1')
+  body.append('do', 'login')
+  fetch('https://www.fxp.co.il/login.php?do=login', {
+    method: 'POST', body
+  })
+  .then(response => {
+    headers['Cookie'] = parseCookies(response)
+  })
+  .catch(error => console.log('error', error))
+}
+
+function get_securitytoken() {
+  return fetch('https://www.fxp.co.il', {headers})
+  .then(response => response.text())
+  .then(html => /SECURITYTOKEN = "(.*)";/.exec(html)[1])
+}
+
+function uploadImage(fileToUpload) {
+  const body = new FormData
+  body.append('base', fileToUpload)
+  return new Promise(e => fetch('https://profile.fcdn.co.il/imageprofile', { 
+      method: 'POST', body
+  })
+  .then(x => x.json())
+  .then(x => e(x.image_link)))
+}
+async function setProfileImage(profile_url) {
+  const body = new FormData
+  body.append('do', 'update_profile_pic')
+  body.append('profile_url', profile_url)
+  body.append('user_id', USER_ID_FXP)
+  body.append('securitytoken', await get_securitytoken())
+  return new Promise(e => fetch('https://www.fxp.co.il/private_chat.php', { 
+    method: 'POST', body, headers
+  })
+  .then(x => x.text())
+  .then(x => 'ok' == x && e()))
+}
 
 async function getCurrentSong() {
-  if(!token) {
-    return console.log("Open your browser at http://localhost:8888/login and come back here.");
+  try {
+    const {body: {item: song}} = await spotifyApi.getMyCurrentPlaybackState()
+    if(!song) return
+    if(!prevSong) prevSong = song.name
+    else if(prevSong == song.name) return
+    prevSong = song.name
+    const buffer = await (await fetch(song.album.images[1].url)).buffer()
+    const imgbs64 = 'data:image/png;base64,'+buffer.toString('base64')  
+    setProfileImage(await uploadImage(imgbs64))
+    console.log("Updating your profile...")
+  } catch (err) {
+    console.log('Open your browser at http://localhost:8888/login and come back here.')
   }
-    const data = await spotifyApi.getMyCurrentPlaybackState();
-    if(!data.body.item) return;
-    var songName = data.body.item.name;
-    if(!prevSong) prevSong = songName;
-    else if(prevSong == songName) return;
-    prevSong = songName;
-    console.log(songName);
-    console.log(data.body.item.album.images[1].url);
-    download(data.body.item.album.images[1].url, 'image.png', function(){
-        console.log('done downloading');
-    });
-    await new Promise(resolve => setTimeout(resolve, 2000));
+}
 
-    const browser = await puppeteer.launch(); ;
-    const page = await browser.newPage();
-    await page.setDefaultNavigationTimeout(0);
+setInterval(getCurrentSong, 5000)
 
-    PuppeteerBlocker.fromPrebuiltAdsAndTracking(fetch).then((blocker) => {
-        blocker.enableBlockingInPage(page);
-      });
-      let body1 = new FormData;
-      // append file to form data
-      body1.append('fileToUpload', fs.createReadStream(path.join(__dirname, "image.png"), 
-      {
-          contentType: 'image/png', filename: 'image.png'
-  }));
-      let reqImg1 = await fetch("https://api.imagesup.co/u", { method: "POST", body: body1,});
-      let resImg1 = await reqImg1?.text();
-      if(!resImg1) return;
-      if(resImg1 == "Invalid file format.") {
-        prevSong = "";
-        getCurrentSong();
-        return;
-      };
-      resImg1 = JSON.parse(resImg1);
-      let ImgUrl = await resImg1.image_link.replace("i.imagesup.co", "profile.fcdn.co.il");
-  
-    await page.goto("https://www.fxp.co.il/member.php?u=1195305");
-    console.log("=======================");
-    console.log(`loging in to ${fxp_username}...`);
-   await  page.evaluate(async (fxp_username, fxp_password) => {
-        const form = new FormData();
-        form.append("vb_login_username", fxp_username);
-        form.append("vb_login_password", fxp_password);
-        form.append("loginbtn","%D7%94%D7%AA%D7%97%D7%91%D7%A8%D7%95%D7%AA&s");
-        form.append("to_homepage", "1");
-        form.append("securitytoken", "guest");
-        form.append("do", "login");
-        form.append("cookieuser", "1");
-        form.append("vb_login_md5password", "");
-        form.append("vb_login_md5password_utf", "");
-        await fetch( "/login.php?do=login", {
-            "body": form,
-            "method": "POST",
-          });
-    
-    }, fxp_username, fxp_password);
-    console.log("Logged in successfully!");
-    console.log("=======================");
-
-
-    await page.reload();
-    console.log("updating your profile...");
-    await page.evaluate((ImgUrl, songName) => {
-        let body = new FormData;
-        body.append("do", "update_profile_pic");
-        body.append("profile_url", ImgUrl);
-        body.append("user_id", "1195305");
-        body.append("securitytoken", SECURITYTOKEN);
-        fetch("/private_chat.php",{ method: "POST", body })
-
-        body = new FormData;
-        body.append("securitytoken", SECURITYTOKEN);
-        body.append("do", "saveuserfield");
-        body.append("fieldid", "1");
-        body.append("userfield[field1_set]", "1");
-        body.append("userfield[field1]", "currently playing: " + songName);
-
-        fetch("https://www.fxp.co.il/ajax.php", {"method": "POST", body});
-    }, ImgUrl, songName);
-    await page.reload();
-    await browser.close();
-    console.log("done!");
-    console.log("=======================");
-};
-
-setInterval(getCurrentSong, 5000);
+process.on('SIGINT', async () => {
+  if (BACKUP_AVATAR_LINK != '') {
+    const buffer = await (await fetch(BACKUP_AVATAR_LINK)).buffer()
+    const imgbs64 = 'data:image/png;base64,'+buffer.toString('base64')
+    setProfileImage(await uploadImage(imgbs64))
+    setTimeout(process.exit, 2000)    
+  } else {
+    process.exit(1)
+  }
+})
